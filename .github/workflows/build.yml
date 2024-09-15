@@ -1,0 +1,64 @@
+name: build
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.short-sha.outputs.sha }}
+    permissions:
+      packages: write
+    container: eclipse-temurin:21.0.4_7-jdk
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - uses: benjlevesque/short-sha@v3.0
+        id: short-sha
+      - name: Build and push
+        run: |
+          ./mvnw clean compile jib:build \
+          -Djib.from.auth.username=${{ github.actor }} \
+          -Djib.from.auth.password=${{ secrets.GITHUB_TOKEN }} \
+          -Djib.to.image=ghcr.io/sdobrovolschi/containers/service:${{ env.SHA }} \
+          -Djib.to.auth.username=${{ github.actor }} \
+          -Djib.to.auth.password=${{ secrets.GITHUB_TOKEN }}
+  deploy-staging:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Check out the config repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT }}
+          repository: sdobrovolschi/gitops-argo
+      - name: Change version
+        uses: mikefarah/yq@v4
+        with:
+          cmd: yq -i '.image.tag = "${{ needs.build.outputs.sha }}"' envs/stage/service/version.yaml
+      - name: Commit
+        id: commit
+        run: |
+          git config --local user.name "github-actions"
+          git config --local user.email "actions@github.com"
+          git commit -am "bump service to ${{ needs.build.outputs.sha }}"
+          echo "COMMIT_SHA=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Push
+        uses: ad-m/github-push-action@v0.8.0
+        with:
+          github_token: ${{ secrets.PAT }}
+          repository: sdobrovolschi/gitops-argo
+      - name: Wait commit status
+        uses: cloudposse/github-action-wait-commit-status@0.2.0
+        with:
+          repository: sdobrovolschi/gitops-argo
+          sha: ${{ steps.commit.outputs.COMMIT_SHA }}
+          status: continuous-delivery/service
+          expected_state: "success"
+          check-timeout: 300 # 5 min
+          check-retry-count: 30
+          check-retry-interval: 20
